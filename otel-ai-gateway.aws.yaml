@@ -1,0 +1,234 @@
+# otel-ai-gateway.aws.yaml
+#
+# Local OTLP gateway for AI coding tools, exporting to Amazon CloudWatch.
+#
+# Run with the contrib distribution:
+#   otelcol-contrib --config otel-ai-gateway.aws.yaml
+#
+# Required environment:
+#   AWS_REGION                     e.g. us-west-2
+#   AI_TELEMETRY_ENV               e.g. prod
+#   AI_TELEMETRY_TENANT            e.g. acme-corp
+#   AI_TELEMETRY_ARCHIVE_BUCKET    S3 bucket for raw retention
+#   AWS credentials via the normal chain (role, SSO, or profile)
+#
+# Each tool gets its own receiver port so the gateway can stamp ai.tool
+# without guessing at scope names or event prefixes.
+
+extensions:
+  health_check:
+    endpoint: 127.0.0.1:13133
+
+  sigv4auth/metrics:
+    region: ${env:AWS_REGION}
+    service: monitoring
+
+  sigv4auth/logs:
+    region: ${env:AWS_REGION}
+    service: logs
+
+  sigv4auth/traces:
+    region: ${env:AWS_REGION}
+    service: xray
+
+receivers:
+  otlp/claude:
+    protocols:
+      grpc:
+        endpoint: 127.0.0.1:4317
+      http:
+        endpoint: 127.0.0.1:4318
+
+  otlp/codex:
+    protocols:
+      grpc:
+        endpoint: 127.0.0.1:4417
+      http:
+        endpoint: 127.0.0.1:4418
+
+  otlp/gemini:
+    protocols:
+      grpc:
+        endpoint: 127.0.0.1:4517
+      http:
+        endpoint: 127.0.0.1:4518
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 75
+    spike_limit_percentage: 15
+
+  batch:
+    timeout: 10s
+    send_batch_size: 200
+    send_batch_max_size: 500
+
+  resourcedetection:
+    detectors: [env, system]
+    system:
+      hostname_sources: [os]
+
+  resource/tenant:
+    attributes:
+      - key: deployment.environment
+        value: ${env:AI_TELEMETRY_ENV}
+        action: upsert
+      - key: org.tenant
+        value: ${env:AI_TELEMETRY_TENANT}
+        action: upsert
+
+  # Stamp the source tool. One processor per receiver port.
+  resource/tool_claude:
+    attributes:
+      - key: ai.tool
+        value: claude_code
+        action: upsert
+  resource/tool_codex:
+    attributes:
+      - key: ai.tool
+        value: codex_cli
+        action: upsert
+  resource/tool_gemini:
+    attributes:
+      - key: ai.tool
+        value: gemini_cli
+        action: upsert
+
+  # Strip secrets that leak through prompts, tool output, and env dumps.
+  redaction/secrets:
+    allow_all_keys: true
+    summary: debug
+    blocked_values:
+      - "sk-ant-[A-Za-z0-9_\\-]{20,}"
+      - "sk-[A-Za-z0-9]{32,}"
+      - "AKIA[0-9A-Z]{16}"
+      - "ASIA[0-9A-Z]{16}"
+      - "ghp_[A-Za-z0-9]{36}"
+      - "github_pat_[A-Za-z0-9_]{60,}"
+      - "xox[baprs]-[A-Za-z0-9\\-]{10,}"
+      - "eyJ[A-Za-z0-9_\\-]{10,}\\.[A-Za-z0-9_\\-]{10,}\\.[A-Za-z0-9_\\-]{10,}"
+      - "-----BEGIN [A-Z ]*PRIVATE KEY-----"
+      - "[A-Za-z0-9._%+\\-]+@[A-Za-z0-9.\\-]+\\.[A-Za-z]{2,}"
+
+  # Raw request and response bodies are the largest and riskiest payload.
+  # Drop them at the gateway unless you have made a deliberate decision to keep them.
+  filter/drop_raw_bodies:
+    error_mode: ignore
+    logs:
+      log_record:
+        - 'attributes["event.name"] == "claude_code.api_request_body"'
+        - 'attributes["event.name"] == "claude_code.api_response_body"'
+
+  # Metrics cardinality control. Every identity attribute here multiplies
+  # your CloudWatch time series count and your bill.
+  attributes/metrics_trim:
+    actions:
+      - key: session.id
+        action: delete
+      - key: user.email
+        action: hash
+      - key: user.id
+        action: hash
+      - key: user.account_uuid
+        action: hash
+      - key: user.account_id
+        action: hash
+      - key: terminal.type
+        action: delete
+
+exporters:
+  otlphttp/metrics:
+    metrics_endpoint: https://monitoring.${env:AWS_REGION}.amazonaws.com/v1/metrics
+    compression: gzip
+    auth:
+      authenticator: sigv4auth/metrics
+    retry_on_failure:
+      enabled: true
+    sending_queue:
+      enabled: true
+      queue_size: 5000
+
+  otlphttp/logs_claude:
+    logs_endpoint: https://logs.${env:AWS_REGION}.amazonaws.com/v1/logs
+    compression: gzip
+    headers:
+      x-aws-log-group: /ai/agent-telemetry
+      x-aws-log-stream: claude-code
+    auth:
+      authenticator: sigv4auth/logs
+
+  otlphttp/logs_codex:
+    logs_endpoint: https://logs.${env:AWS_REGION}.amazonaws.com/v1/logs
+    compression: gzip
+    headers:
+      x-aws-log-group: /ai/agent-telemetry
+      x-aws-log-stream: codex-cli
+    auth:
+      authenticator: sigv4auth/logs
+
+  otlphttp/logs_gemini:
+    logs_endpoint: https://logs.${env:AWS_REGION}.amazonaws.com/v1/logs
+    compression: gzip
+    headers:
+      x-aws-log-group: /ai/agent-telemetry
+      x-aws-log-stream: gemini-cli
+    auth:
+      authenticator: sigv4auth/logs
+
+  otlphttp/traces:
+    traces_endpoint: https://xray.${env:AWS_REGION}.amazonaws.com/v1/traces
+    compression: gzip
+    auth:
+      authenticator: sigv4auth/traces
+
+  # Optional cheap raw retention for questions you have not thought of yet.
+  # set an ENV variable if you enable this exporter, e.g.:
+  # export AI_TELEMETRY_ARCHIVE_BUCKET=acme-ai-telemetry-archive
+  # and add the exporter to the pipelines below starting on line 205
+  # awss3/archive:
+  #   s3uploader:
+  #     region: ${env:AWS_REGION}
+  #     s3_bucket: ${env:AI_TELEMETRY_ARCHIVE_BUCKET}
+  #     s3_prefix: ai-telemetry
+  #     s3_partition_format: "%Y/%m/%d/%H"
+  #   marshaler: otlp_json
+
+  debug:
+    verbosity: basic
+
+service:
+  extensions: [health_check, sigv4auth/metrics, sigv4auth/logs, sigv4auth/traces]
+  telemetry:
+    logs:
+      level: info
+  pipelines:
+    logs/claude:
+      receivers: [otlp/claude]
+      processors: [memory_limiter, resourcedetection, resource/tenant, resource/tool_claude, filter/drop_raw_bodies, redaction/secrets, batch]
+      exporters: [otlphttp/logs_claude]
+
+    logs/codex:
+      receivers: [otlp/codex]
+      processors: [memory_limiter, resourcedetection, resource/tenant, resource/tool_codex, redaction/secrets, batch]
+      exporters: [otlphttp/logs_codex]
+
+    logs/gemini:
+      receivers: [otlp/gemini]
+      processors: [memory_limiter, resourcedetection, resource/tenant, resource/tool_gemini, redaction/secrets, batch]
+      exporters: [otlphttp/logs_gemini]
+
+    metrics/claude:
+      receivers: [otlp/claude]
+      processors: [memory_limiter, resourcedetection, resource/tenant, resource/tool_claude, attributes/metrics_trim, batch]
+      exporters: [otlphttp/metrics]
+
+    metrics/gemini:
+      receivers: [otlp/gemini]
+      processors: [memory_limiter, resourcedetection, resource/tenant, resource/tool_gemini, attributes/metrics_trim, batch]
+      exporters: [otlphttp/metrics]
+
+    traces/claude:
+      receivers: [otlp/claude]
+      processors: [memory_limiter, resourcedetection, resource/tenant, resource/tool_claude, redaction/secrets, batch]
+      exporters: [otlphttp/traces]

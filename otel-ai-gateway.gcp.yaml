@@ -1,0 +1,201 @@
+# otel-ai-gateway.gcp.yaml
+#
+# Local OTLP gateway for AI coding tools, exporting to Google Cloud
+# Observability via the Telemetry (OTLP) API.
+#
+# Run with the contrib distribution:
+#   otelcol-contrib --config otel-ai-gateway.gcp.yaml
+#
+# Required environment:
+#   GOOGLE_CLOUD_PROJECT           destination project id
+#   AI_TELEMETRY_ENV               e.g. prod
+#   AI_TELEMETRY_TENANT            e.g. acme-corp
+#   Application Default Credentials on the host
+#
+# Required IAM on the collector identity:
+#   roles/telemetry.writer
+#   roles/serviceusage.serviceUsageConsumer
+
+extensions:
+  health_check:
+    endpoint: 127.0.0.1:13133
+
+  googleclientauth:
+    project: ${env:GOOGLE_CLOUD_PROJECT}
+    quota_project: ${env:GOOGLE_CLOUD_PROJECT}
+
+receivers:
+  otlp/claude:
+    protocols:
+      grpc:
+        endpoint: 127.0.0.1:4317
+      http:
+        endpoint: 127.0.0.1:4318
+
+  otlp/codex:
+    protocols:
+      grpc:
+        endpoint: 127.0.0.1:4417
+      http:
+        endpoint: 127.0.0.1:4418
+
+  otlp/gemini:
+    protocols:
+      grpc:
+        endpoint: 127.0.0.1:4517
+      http:
+        endpoint: 127.0.0.1:4518
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 75
+    spike_limit_percentage: 15
+
+  batch:
+    timeout: 10s
+    send_batch_size: 200
+    send_batch_max_size: 500
+
+  resourcedetection:
+    detectors: [env, system]
+    system:
+      hostname_sources: [os]
+
+  # The Telemetry API requires gcp.project_id on the resource.
+  resource/gcp_project_id:
+    attributes:
+      - key: gcp.project_id
+        value: ${env:GOOGLE_CLOUD_PROJECT}
+        action: upsert
+
+  resource/tenant:
+    attributes:
+      - key: deployment.environment
+        value: ${env:AI_TELEMETRY_ENV}
+        action: upsert
+      - key: org.tenant
+        value: ${env:AI_TELEMETRY_TENANT}
+        action: upsert
+
+  resource/tool_claude:
+    attributes:
+      - key: ai.tool
+        value: claude_code
+        action: upsert
+  resource/tool_codex:
+    attributes:
+      - key: ai.tool
+        value: codex_cli
+        action: upsert
+  resource/tool_gemini:
+    attributes:
+      - key: ai.tool
+        value: gemini_cli
+        action: upsert
+
+  redaction/secrets:
+    allow_all_keys: true
+    summary: debug
+    blocked_values:
+      - "sk-ant-[A-Za-z0-9_\\-]{20,}"
+      - "sk-[A-Za-z0-9]{32,}"
+      - "AKIA[0-9A-Z]{16}"
+      - "ASIA[0-9A-Z]{16}"
+      - "ghp_[A-Za-z0-9]{36}"
+      - "github_pat_[A-Za-z0-9_]{60,}"
+      - "xox[baprs]-[A-Za-z0-9\\-]{10,}"
+      - "eyJ[A-Za-z0-9_\\-]{10,}\\.[A-Za-z0-9_\\-]{10,}\\.[A-Za-z0-9_\\-]{10,}"
+      - "-----BEGIN [A-Z ]*PRIVATE KEY-----"
+      - "[A-Za-z0-9._%+\\-]+@[A-Za-z0-9.\\-]+\\.[A-Za-z]{2,}"
+
+  filter/drop_raw_bodies:
+    error_mode: ignore
+    logs:
+      log_record:
+        - 'attributes["event.name"] == "claude_code.api_request_body"'
+        - 'attributes["event.name"] == "claude_code.api_response_body"'
+
+  attributes/metrics_trim:
+    actions:
+      - key: session.id
+        action: delete
+      - key: user.email
+        action: hash
+      - key: user.id
+        action: hash
+      - key: user.account_uuid
+        action: hash
+      - key: user.account_id
+        action: hash
+      - key: terminal.type
+        action: delete
+
+  # Sets a start time on cumulative points that arrive without one.
+  metricstarttime:
+    strategy: subtract_initial_point
+
+  # The Telemetry API maps OTLP metrics onto the prometheus_target
+  # monitored resource, which requires an instance (service.instance.id)
+  # and a location (cloud.region). Points without them are rejected
+  # with INVALID_ARGUMENT. host.name comes from resourcedetection.
+  resource/metrics_target:
+    attributes:
+      - key: service.instance.id
+        from_attribute: host.name
+        action: upsert
+      - key: cloud.region
+        value: us-central1
+        action: upsert
+
+exporters:
+  otlphttp/gcp:
+    endpoint: https://telemetry.googleapis.com
+    encoding: proto
+    compression: gzip
+    auth:
+      authenticator: googleclientauth
+    retry_on_failure:
+      enabled: true
+    sending_queue:
+      enabled: true
+      queue_size: 5000
+
+  debug:
+    verbosity: basic
+
+service:
+  extensions: [health_check, googleclientauth]
+  telemetry:
+    logs:
+      level: info
+  pipelines:
+    logs/claude:
+      receivers: [otlp/claude]
+      processors: [memory_limiter, resourcedetection, resource/gcp_project_id, resource/tenant, resource/tool_claude, filter/drop_raw_bodies, redaction/secrets, batch]
+      exporters: [otlphttp/gcp]
+
+    logs/codex:
+      receivers: [otlp/codex]
+      processors: [memory_limiter, resourcedetection, resource/gcp_project_id, resource/tenant, resource/tool_codex, redaction/secrets, batch]
+      exporters: [otlphttp/gcp]
+
+    logs/gemini:
+      receivers: [otlp/gemini]
+      processors: [memory_limiter, resourcedetection, resource/gcp_project_id, resource/tenant, resource/tool_gemini, redaction/secrets, batch]
+      exporters: [otlphttp/gcp]
+
+    metrics/claude:
+      receivers: [otlp/claude]
+      processors: [memory_limiter, resourcedetection, resource/gcp_project_id, resource/metrics_target, resource/tenant, resource/tool_claude, attributes/metrics_trim, metricstarttime, batch]
+      exporters: [otlphttp/gcp]
+
+    metrics/gemini:
+      receivers: [otlp/gemini]
+      processors: [memory_limiter, resourcedetection, resource/gcp_project_id, resource/metrics_target, resource/tenant, resource/tool_gemini, attributes/metrics_trim, metricstarttime, batch]
+      exporters: [otlphttp/gcp]
+
+    traces/claude:
+      receivers: [otlp/claude]
+      processors: [memory_limiter, resourcedetection, resource/gcp_project_id, resource/tenant, resource/tool_claude, redaction/secrets, batch]
+      exporters: [otlphttp/gcp]

@@ -1,0 +1,12 @@
+# ~/.codex/config.toml
+#
+# Codex sends log events only. It emits no OTLP metrics today,
+# so plan on Claude Code and Gemini CLI for the cost dashboards.
+
+[otel]
+environment = "prod"
+log_user_prompt = false
+exporter = { otlp-http = { endpoint = "http://127.0.0.1:4418/v1/logs", protocol = "binary" } }
+
+# gRPC alternative:
+# exporter = { otlp-grpc = { endpoint = "http://127.0.0.1:4417" } }
