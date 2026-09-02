@@ -8,8 +8,7 @@ Validated against `otelcol-contrib` v0.140.1 and v0.159.0.
 
 ## Architecture
 
-The OpenTelemetry Collector contrib distribution captures OTEL from local AI Agents. Run it on laptops using AI agents or on a
-shared host, point every AI tool at it, and export once to your cloud.
+The OpenTelemetry Collector contrib distribution captures OTEL from local AI Agents. Run it on laptops using AI agents or on a shared host, point every AI tool at it, and export once to your cloud.
 
 ```
 Claude Code ──grpc 4317 / http 4318 ─┐
@@ -17,15 +16,13 @@ Codex CLI   ──grpc 4417 / http 4418 ─┼──► otelcol-contrib ──�
 Gemini CLI  ──grpc 4517 / http 4518 ─┘
 ```
 
-Each tool gets its own port. The gateway stamps `ai.tool` based on the
-port, so you can query all three together without guessing at event
-name prefixes or scope names.
+Each tool gets its own port. The gateway stamps `ai.tool` based on the port, so you can query all three together without guessing at event name prefixes or scope names.
 
 ## Install
 
 Install from the release tarball, or the container image.
 
-We purposefully use the contrib build for native cloud authentication. The core build (`otelcol`, no `-contrib`) does not include `sigv4auth`, `googleclientauth`, `redaction` or `awss3`.
+We purposefully use the contrib build for native cloud authentication. The core build (`otelcol`, no `-contrib`) does not include `sigv4auth`, `googleclientauth`, `redaction` or `awss3` options. Using the contrib build we can reuse native AWS or GCP authentication without harcoding api keys or headers in the config.
 
 Note the binary name. The download is `otelcol-contrib_<version>_<os>_<arch>.tar.gz`
 and the binary inside is `otelcol-contrib`.
