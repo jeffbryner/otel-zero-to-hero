@@ -203,6 +203,12 @@ egress to the ingest endpoints, and monitor its own health endpoint.
 This is meant as a POC rather than a production blueprint. The OTEL project has a extensive list of configuration options for various OTEL production configurations here: https://opentelemetry.io/ecosystem/vendors/
 
 
+## Query notes
+Anthropic on how to reconstruct a user session: 
+https://support.claude.com/en/articles/14447276-configure-a-custom-opentelemetry-collector-for-office-agents#h_f2c9f8763d
+
+
+
 ## Screenshots
 GCP Metrics Explorer
 https://console.cloud.google.com/monitoring/metrics-explorer
